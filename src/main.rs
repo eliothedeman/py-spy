@@ -15,6 +15,7 @@ mod dump;
 mod flamegraph;
 #[cfg(feature = "unwind")]
 mod native_stack_trace;
+mod perfetto;
 mod python_bindings;
 mod python_data_access;
 mod python_interpreters;
@@ -38,6 +39,7 @@ use console::style;
 
 use config::{Config, FileFormat, RecordDuration};
 use console_viewer::ConsoleViewer;
+use inferno::collapse::perf;
 use stack_trace::{Frame, StackTrace};
 
 use chrono::{Local, SecondsFormat};
@@ -88,15 +90,15 @@ fn sample_console(pid: remoteprocess::Pid, config: &Config) -> Result<(), Error>
 
 pub trait Recorder {
     fn increment(&mut self, trace: &StackTrace) -> Result<(), Error>;
-    fn write(&self, w: &mut dyn Write) -> Result<(), Error>;
+    fn write(&mut self, w: &mut dyn Write) -> Result<(), Error>;
 }
 
 impl Recorder for speedscope::Stats {
     fn increment(&mut self, trace: &StackTrace) -> Result<(), Error> {
         Ok(self.record(trace)?)
     }
-    fn write(&self, w: &mut dyn Write) -> Result<(), Error> {
-        self.write(w)
+    fn write(&mut self, w: &mut dyn Write) -> Result<(), Error> {
+        speedscope::Stats::write(&self, w)
     }
 }
 
@@ -104,8 +106,8 @@ impl Recorder for flamegraph::Flamegraph {
     fn increment(&mut self, trace: &StackTrace) -> Result<(), Error> {
         Ok(self.increment(trace)?)
     }
-    fn write(&self, w: &mut dyn Write) -> Result<(), Error> {
-        self.write(w)
+    fn write(&mut self, w: &mut dyn Write) -> Result<(), Error> {
+        flamegraph::Flamegraph::write(&self, w)
     }
 }
 
@@ -113,8 +115,8 @@ impl Recorder for chrometrace::Chrometrace {
     fn increment(&mut self, trace: &StackTrace) -> Result<(), Error> {
         Ok(self.increment(trace)?)
     }
-    fn write(&self, w: &mut dyn Write) -> Result<(), Error> {
-        self.write(w)
+    fn write(&mut self, w: &mut dyn Write) -> Result<(), Error> {
+        chrometrace::Chrometrace::write(&self, w)
     }
 }
 
@@ -125,8 +127,18 @@ impl Recorder for RawFlamegraph {
         Ok(self.0.increment(trace)?)
     }
 
-    fn write(&self, w: &mut dyn Write) -> Result<(), Error> {
+    fn write(&mut self, w: &mut dyn Write) -> Result<(), Error> {
         self.0.write_raw(w)
+    }
+}
+
+impl Recorder for perfetto::PerfettoTrace {
+    fn increment(&mut self, trace: &StackTrace) -> Result<(), Error> {
+        Ok(perfetto::PerfettoTrace::increment(self, trace)?)
+    }
+
+    fn write(&mut self, w: &mut dyn Write) -> Result<(), Error> {
+        perfetto::PerfettoTrace::write(self, w)
     }
 }
 
@@ -142,6 +154,9 @@ fn record_samples(pid: remoteprocess::Pid, config: &Config) -> Result<(), Error>
         Some(FileFormat::chrometrace) => {
             Box::new(chrometrace::Chrometrace::new(config.show_line_numbers))
         }
+        Some(FileFormat::perfetto) => {
+            Box::new(perfetto::PerfettoTrace::new(config.show_line_numbers))
+        }
         None => return Err(format_err!("A file format is required to record samples")),
     };
 
@@ -153,6 +168,7 @@ fn record_samples(pid: remoteprocess::Pid, config: &Config) -> Result<(), Error>
                 Some(FileFormat::speedscope) => "json",
                 Some(FileFormat::raw) => "txt",
                 Some(FileFormat::chrometrace) => "json",
+                Some(FileFormat::perfetto) => "pftrace",
                 None => return Err(format_err!("A file format is required to record samples")),
             };
             let local_time = Local::now().to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -360,6 +376,12 @@ fn record_samples(pid: remoteprocess::Pid, config: &Config) -> Result<(), Error>
                 "{lede}Wrote chrome trace to '{filename}'. Samples: {samples} Errors: {errors}"
             );
             println!("{lede}Visit chrome://tracing or https://ui.perfetto.dev/ to view");
+        }
+        FileFormat::perfetto => {
+            println!(
+                "{lede}Wrote perfetto trace to '{filename}'. Samples: {samples} Errors: {errors}"
+            );
+            println!("{lede}Visit https://ui.perfetto.dev/ to view");
         }
     };
 
