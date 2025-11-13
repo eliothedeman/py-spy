@@ -1,7 +1,6 @@
 use std::cmp::min;
 use std::collections::HashMap;
 use std::io::Write;
-use std::time::Instant;
 
 use anyhow::Error;
 use bytes::BufMut;
@@ -12,7 +11,6 @@ use crate::stack_trace::Frame;
 use crate::stack_trace::StackTrace;
 
 pub struct PerfettoTrace {
-    start_ts: Instant,
     encoder: Context<bytes::buf::Writer<bytes::BytesMut>>,
     thread_to_track: HashMap<(i32, u64), u64>,
     prev_traces: HashMap<u64, StackTrace>,
@@ -23,7 +21,6 @@ impl PerfettoTrace {
     pub fn new(show_linenumbers: bool) -> Self {
         Self {
             encoder: Context::new(BytesMut::new().writer()),
-            start_ts: Instant::now(),
             show_linenumbers,
             thread_to_track: HashMap::new(),
             prev_traces: HashMap::new(),
@@ -34,12 +31,18 @@ impl PerfettoTrace {
         if let Some(id) = self.thread_to_track.get(&(trace.pid, trace.thread_id)) {
             return *id;
         }
-        self.encoder
+
+        let id = self
+            .encoder
             .track()
             .pid(trace.pid)
             .tid(trace.thread_id as i32)
             .uuid(rand::random())
-            .build()
+            .build();
+
+        self.thread_to_track
+            .insert((trace.pid, trace.thread_id), id);
+        id
     }
 
     // Return whether these frames are similar enough such that we should merge
@@ -50,6 +53,12 @@ impl PerfettoTrace {
 
     pub fn increment(&mut self, trace: &StackTrace) -> std::io::Result<()> {
         let track = self.track_for(trace);
+
+        let prev_owned_gil = self
+            .prev_traces
+            .get(&trace.thread_id)
+            .map(|stack| stack.owns_gil)
+            .unwrap_or(false);
 
         // Load the previous frames for this thread.
         let prev_frames = self
@@ -63,7 +72,9 @@ impl PerfettoTrace {
             .iter()
             .rev()
             .zip(trace.frames.iter().rev())
-            .position(|(a, b)| !self.should_merge_frames(a, b))
+            .position(|(a, b)| {
+                !(self.should_merge_frames(a, b) && prev_owned_gil == trace.owns_gil)
+            })
             .unwrap_or(min(prev_frames.len(), trace.frames.len()));
 
         // Publish end events for the previous frames that got dropped in the
@@ -86,6 +97,7 @@ impl PerfettoTrace {
                 .event()
                 .with_track_uuid(track)
                 .with_begin()
+                .with_debug_bool("owns_gil", trace.owns_gil)
                 .with_now()
                 .with_name(&frame.name)
                 .with_source_location(&frame.filename, frame.line as u32)
@@ -99,10 +111,26 @@ impl PerfettoTrace {
     }
 
     pub fn write(&mut self, w: &mut dyn Write) -> Result<(), Error> {
-        let encoder = std::mem::replace(
+        let mut encoder = std::mem::replace(
             &mut self.encoder,
             Context::new(bytes::BytesMut::new().writer()),
         );
+        for (_, trace) in self.prev_traces.iter() {
+            let track = self
+                .thread_to_track
+                .get(&(trace.pid, trace.thread_id))
+                .unwrap();
+            for frame in trace.frames.iter() {
+                encoder
+                    .event()
+                    .with_track_uuid(*track)
+                    .with_end()
+                    .with_now()
+                    .with_name(&frame.name)
+                    .with_source_location(&frame.filename, frame.line as u32)
+                    .build();
+            }
+        }
         let buff = encoder.into_inner().into_inner().freeze();
         w.write_all(&buff)?;
         Ok(())
