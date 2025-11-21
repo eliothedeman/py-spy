@@ -42,7 +42,7 @@ rand = "0.8"
 rand_distr = "0.4"
 remoteprocess = "0.5.1"
 chrono = "0.4.26"
-perfetto-writer = "0.1.0"
+perfetto-writer = { path="../perfetto-sdk-rs/perfetto-writer",  version="0.3.2"}
 bytes = "1.10.1"
 
 [dev-dependencies]
