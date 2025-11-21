@@ -11,7 +11,7 @@ use crate::stack_trace::Frame;
 use crate::stack_trace::StackTrace;
 
 pub struct PerfettoTrace {
-    encoder: Context<bytes::buf::Writer<bytes::BytesMut>>,
+    encoder: Context,
     thread_to_track: HashMap<(i32, u64), u64>,
     prev_traces: HashMap<u64, StackTrace>,
     show_linenumbers: bool,
@@ -20,7 +20,7 @@ pub struct PerfettoTrace {
 impl PerfettoTrace {
     pub fn new(show_linenumbers: bool) -> Self {
         Self {
-            encoder: Context::new(BytesMut::new().writer()),
+            encoder: Context::new(),
             show_linenumbers,
             thread_to_track: HashMap::new(),
             prev_traces: HashMap::new(),
@@ -111,17 +111,13 @@ impl PerfettoTrace {
     }
 
     pub fn write(&mut self, w: &mut dyn Write) -> Result<(), Error> {
-        let mut encoder = std::mem::replace(
-            &mut self.encoder,
-            Context::new(bytes::BytesMut::new().writer()),
-        );
         for (_, trace) in self.prev_traces.iter() {
             let track = self
                 .thread_to_track
                 .get(&(trace.pid, trace.thread_id))
                 .unwrap();
             for frame in trace.frames.iter() {
-                encoder
+                self.encoder
                     .event()
                     .with_track_uuid(*track)
                     .with_end()
@@ -131,8 +127,7 @@ impl PerfettoTrace {
                     .build();
             }
         }
-        let buff = encoder.into_inner().into_inner().freeze();
-        w.write_all(&buff)?;
+        self.encoder.write_to(w)?;
         Ok(())
     }
 }
